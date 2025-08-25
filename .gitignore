@@ -11,7 +11,8 @@ __pycache__
 /*.pdb
 /*.mol
 /analysis
-/data
+/data/*
+!/data/pdbbind
 /analysis/casf_test/power_screening
 /analysis/casf_test/power_screening.tar
 *.ckpt

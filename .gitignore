@@ -1,0 +1,25 @@
+__pycache__
+.cursor
+/logs
+/models
+/test_output
+/src/*.pdb
+/src/*.pse
+/src/*.mol
+/src/*.png
+/src/*.svg
+/*.pdb
+/*.mol
+/analysis
+/data
+/analysis/casf_test/power_screening
+/analysis/casf_test/power_screening.tar
+*.ckpt
+.DS_Store
+/slurm_logs
+backup
+
+# API keys and secrets
+wandb_api_key.txt
+*.key
+*.secret

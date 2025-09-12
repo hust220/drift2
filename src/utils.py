@@ -22,6 +22,10 @@ class Logger(object):
         # you might want to specify some extra behavior here.
         pass
 
+    def isatty(self):
+        # Return whether the terminal is a tty
+        return self.terminal.isatty() if hasattr(self.terminal, 'isatty') else False
+
 
 def log(*args):
     print(f'[{datetime.now()}]', *args)

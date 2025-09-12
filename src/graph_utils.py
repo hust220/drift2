@@ -32,8 +32,8 @@ def aa_one_hot(residue):
 
 def bond_one_hot(bond):
     """Convert bond type to one-hot encoding."""
-    one_hot = [0 for i in range(const.N_RDBOND_TYPES)]
-    
+    n = const.N_RDBOND_TYPES
+    one_hot = np.zeros(n)
     bond_type = bond.GetBondType()
     if bond_type not in const.RDBOND2IDX:
         bond_type = Chem.rdchem.BondType.ZERO
@@ -42,15 +42,8 @@ def bond_one_hot(bond):
     return one_hot
 
 
-def parse_molecule_from_sdf(sdf_content):
-    """Parse molecule from SDF content string"""
-    supplier = Chem.SDMolSupplier()
-    supplier.SetData(sdf_content)
-    
-    mol = next(supplier)
-    if mol is None:
-        return None, None, None
-    
+def parse_molecule(mol):
+    """Parse a single RDKit molecule into graph data"""
     atom_one_hots = []
     non_h_indices = []
     
@@ -78,10 +71,92 @@ def parse_molecule_from_sdf(sdf_content):
             one_hot = bond_one_hot(bond)
             new_i = old_idx_to_new[i]
             new_j = old_idx_to_new[j]
-            bonds.append([new_i, new_j] + one_hot)
-            bonds.append([new_j, new_i] + one_hot)
+            bonds.append([new_i, new_j] + list(one_hot))
+            bonds.append([new_j, new_i] + list(one_hot))
 
     return positions, np.array(atom_one_hots), np.array(bonds)
+
+def parse_molecule_from_sdf(sdf_content):
+    """Parse molecule from SDF content string"""
+    supplier = Chem.SDMolSupplier()
+    supplier.SetData(sdf_content)
+    
+    mol = next(supplier)
+    if mol is None:
+        return None, None, None
+    
+    return parse_molecule(mol)
+
+def parse_molecules_from_sdf(sdf_content, name=None):
+    """Parse multiple molecules from SDF content"""
+    supplier = Chem.SDMolSupplier()
+    supplier.SetData(sdf_content)
+    
+    for mol in supplier:
+        if mol is None:
+            continue
+            
+        # Get molecule name from specified property or fallback to _Name
+        if name and mol.HasProp(name):
+            mol_name = mol.GetProp(name)
+        elif mol.HasProp('_Name'):
+            mol_name = mol.GetProp('_Name')
+        else:
+            mol_name = None
+        
+        # Parse molecule data
+        positions, one_hot, bonds = parse_molecule(mol)
+        
+        yield {
+            'name': mol_name,
+            'positions': positions,
+            'one_hot': one_hot,
+            'bonds': bonds
+        }
+
+def parse_molecules_from_smi(smi_content, generate_coords=False):
+    """Parse multiple molecules from SMILES content"""
+    from rdkit.Chem import AllChem
+    
+    lines = smi_content.strip().split('\n')
+    
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+            
+        parts = line.split()
+        if len(parts) == 0:
+            continue
+            
+        smiles = parts[0]
+        name = parts[1] if len(parts) > 1 else None
+        
+        try:
+            mol = Chem.MolFromSmiles(smiles)
+            if mol is None:
+                continue
+                
+            if generate_coords:
+                # Generate 3D coordinates
+                mol = Chem.AddHs(mol)
+                AllChem.EmbedMolecule(mol, randomSeed=42)
+                AllChem.MMFFOptimizeMolecule(mol)
+            
+            # Parse molecule data
+            positions, one_hot, bonds = parse_molecule(mol)
+            
+            yield {
+                'name': name,
+                'positions': positions,
+                'one_hot': one_hot,
+                'bonds': bonds
+            }
+            
+        except Exception as e:
+            print(f"Warning: Failed to parse SMILES '{smiles}': {e}")
+            raise e
+            # continue
 
 
 def parse_pocket_from_pdb(pdb_content):
@@ -94,21 +169,19 @@ def parse_pocket_from_pdb(pdb_content):
     pocket_types = []
     residue_info = []  # Store (residue_id, chain_id) for backbone detection
 
-    # Iterate through all models, chains, and residues
-    for model in structure.get_models():
-        for chain in model.chains:
-            for residue in chain.get_residues():
-                residue_name = residue.res_name
-                residue_id = residue.res_id
-                chain_id = residue.chain_id
-                
-                # Look for CA atom
-                ca_atom = residue.get_atom('CA')
-                if ca_atom is not None:
-                    atom_coord = ca_atom.get_coord()
-                    pocket_coords.append(atom_coord.tolist())
-                    pocket_types.append(residue_name)
-                    residue_info.append((residue_id, chain_id))
+    for chain in structure[0].chains:
+        for residue in chain.get_residues():
+            residue_name = residue.res_name
+            residue_id = residue.res_id
+            chain_id = residue.chain_id
+            
+            # Look for CA atom
+            ca_atom = residue.get_atom('CA')
+            if ca_atom is not None:
+                atom_coord = ca_atom.get_coord()
+                pocket_coords.append(atom_coord.tolist())
+                pocket_types.append(residue_name)
+                residue_info.append((residue_id, chain_id))
 
     pocket_one_hot = []
     for _type in pocket_types:

@@ -24,3 +24,6 @@ backup
 wandb_api_key.txt
 *.key
 *.secret
+*_hmdb.scores
+HCAR*.scores
+results.txt

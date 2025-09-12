@@ -81,6 +81,7 @@ def main(args):
         samples_dir=samples_dir,
         data_augmentation=args.data_augmentation,
         table_name=args.table_name,
+        use_affinity_mode=args.use_affinity_mode,
     )
     checkpoint_callback = callbacks.ModelCheckpoint(
         dirpath=checkpoints_dir,
@@ -136,6 +137,7 @@ if __name__ == '__main__':
     p.add_argument('--enable_progress_bar', action='store_true', help='Enable progress bar')
     p.add_argument('--n_epochs', type=int, default=200)
     p.add_argument('--table_name', type=str, default='pdbbind_dataset', help='Database table name for dataset')
+    p.add_argument('--use_affinity_mode', action='store_true', help='Use affinity mode: positive scores should equal binding affinities')
 
     disable_rdkit_logging()
 

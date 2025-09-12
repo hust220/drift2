@@ -68,7 +68,7 @@ def process_chunk(chunk_ids):
         with db_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT pdb_id, pocket_pdb, ligand_sdf 
+                SELECT pdb_id, pocket_pdb, ligand_sdf
                 FROM pdbbind 
                 WHERE id = ANY(%s)
             """, (chunk_ids,))

@@ -4,8 +4,8 @@ import torch
 from src import const
 from src.gnn import GNN
 from src.const import TORCH_INT
-from src.pocket_ligand_dataset import (
-    PocketLigandDataset, get_pocket_ligand_dataloader, collate_pocket_ligand
+from src.datasets import (
+    PocketLigandDataset, get_pocket_ligand_dataloader, collate
 )
 from typing import Dict, List, Optional
 from torch.nn import functional as F
@@ -31,6 +31,7 @@ class Drift2(pl.LightningModule):
         activation='silu', n_layers=3, sin_embedding=True, normalization_factor=1, aggregation_method='sum',
         batch_size=2, lr=1e-4, torch_device='cpu', test_epochs=1, n_stability_samples=1,
         log_iterations=None, samples_dir=None, data_augmentation=False, table_name='pdbbind_dataset',
+        use_affinity_mode=False,
     ):
         super(Drift2, self).__init__()
 
@@ -44,6 +45,7 @@ class Drift2(pl.LightningModule):
         self.samples_dir = samples_dir
         self.data_augmentation = data_augmentation
         self.table_name = table_name
+        self.use_affinity_mode = use_affinity_mode
 
         self.in_node_nf = const.N_RESIDUE_TYPES + const.N_ATOM_TYPES  # 氨基酸和原子的one-hot编码
         self.in_edge_nf = 1 + 1 + 1 + 1 + const.N_RDBOND_TYPES  # distance, is_backbone, is_pocket_mol, is_mol_mol, bond_features
@@ -130,20 +132,40 @@ class Drift2(pl.LightningModule):
         
         return score
     
-    def loss_fn(self, positive_scores, negative_scores, margin=1.0):
+    def loss_fn(self, positive_scores, negative_scores, positive_affinities=None, margin=1.0):
         """
-        Contrastive loss: positive scores should be higher than negative scores
+        Loss function supporting both contrastive and affinity modes
         positive_scores: [batch] - scores for positive pairs
         negative_scores: [batch] - scores for negative pairs
+        positive_affinities: [batch] - binding affinities for positive pairs (optional)
         """
-        # Margin ranking loss: max(0, margin - (positive - negative))
-        loss = F.margin_ranking_loss(
-            positive_scores, 
-            negative_scores, 
-            torch.ones_like(positive_scores),  # target: positive should be > negative
-            margin=margin,
-            reduction='mean'
-        )
+        if self.use_affinity_mode and positive_affinities is not None:
+            # Affinity mode: positive scores should equal affinities, negative scores should be lower
+            # Loss = L1(positive_scores, affinities) + max(0, margin - (affinities - negative_scores))
+            
+            # L1 loss for positive scores to match affinities
+            affinity_loss = F.l1_loss(positive_scores, positive_affinities)
+            
+            # Margin ranking loss: affinities should be higher than negative scores
+            ranking_loss = F.margin_ranking_loss(
+                positive_affinities,
+                negative_scores,
+                torch.ones_like(positive_affinities),
+                margin=margin,
+                reduction='mean'
+            )
+            
+            # Combine losses
+            loss = affinity_loss + ranking_loss
+        else:
+            # Original contrastive mode: positive scores should be higher than negative scores
+            loss = F.margin_ranking_loss(
+                positive_scores, 
+                negative_scores, 
+                torch.ones_like(positive_scores),  # target: positive should be > negative
+                margin=margin,
+                reduction='mean'
+            )
         return loss
 
     def training_step(self, data, *args):
@@ -155,8 +177,13 @@ class Drift2(pl.LightningModule):
         positive_scores = self.forward(positive_data)
         negative_scores = self.forward(negative_data)
         
-        # Compute contrastive loss
-        loss = self.loss_fn(positive_scores, negative_scores)
+        # Get affinities if available
+        positive_affinities = None
+        if self.use_affinity_mode and 'affinity' in positive_data:
+            positive_affinities = positive_data['affinity']
+        
+        # Compute loss
+        loss = self.loss_fn(positive_scores, negative_scores, positive_affinities)
         
         # Calculate accuracy (how often positive > negative)
         accuracy = (positive_scores > negative_scores).float().mean()
@@ -167,6 +194,11 @@ class Drift2(pl.LightningModule):
             'positive_score_mean': positive_scores.mean(),
             'negative_score_mean': negative_scores.mean(),
         }
+        
+        # Add affinity metrics if in affinity mode
+        if self.use_affinity_mode and positive_affinities is not None:
+            training_metrics['affinity_mean'] = positive_affinities.mean()
+            training_metrics['affinity_mse'] = F.mse_loss(positive_scores, positive_affinities)
         
         if self.log_iterations is not None and self.global_step % self.log_iterations == 0:
             for metric_name, metric in training_metrics.items():
@@ -187,8 +219,13 @@ class Drift2(pl.LightningModule):
         positive_scores = self.forward(positive_data)
         negative_scores = self.forward(negative_data)
         
-        # Compute contrastive loss
-        loss = self.loss_fn(positive_scores, negative_scores)
+        # Get affinities if available
+        positive_affinities = None
+        if self.use_affinity_mode and 'affinity' in positive_data:
+            positive_affinities = positive_data['affinity']
+        
+        # Compute loss
+        loss = self.loss_fn(positive_scores, negative_scores, positive_affinities)
         
         # Calculate accuracy (how often positive > negative)
         accuracy = (positive_scores > negative_scores).float().mean()
@@ -199,6 +236,12 @@ class Drift2(pl.LightningModule):
             'positive_score_mean': positive_scores.mean(),
             'negative_score_mean': negative_scores.mean(),
         }
+        
+        # Add affinity metrics if in affinity mode
+        if self.use_affinity_mode and positive_affinities is not None:
+            rt['affinity_mean'] = positive_affinities.mean()
+            rt['affinity_mse'] = F.mse_loss(positive_scores, positive_affinities)
+        
         self.validation_step_outputs.append(rt)
         return loss  # Return only loss to avoid auto-logging
 
@@ -211,8 +254,13 @@ class Drift2(pl.LightningModule):
         positive_scores = self.forward(positive_data)
         negative_scores = self.forward(negative_data)
         
-        # Compute contrastive loss
-        loss = self.loss_fn(positive_scores, negative_scores)
+        # Get affinities if available
+        positive_affinities = None
+        if self.use_affinity_mode and 'affinity' in positive_data:
+            positive_affinities = positive_data['affinity']
+        
+        # Compute loss
+        loss = self.loss_fn(positive_scores, negative_scores, positive_affinities)
         
         # Calculate accuracy (how often positive > negative)
         accuracy = (positive_scores > negative_scores).float().mean()
@@ -223,6 +271,12 @@ class Drift2(pl.LightningModule):
             'positive_score_mean': positive_scores.mean(),
             'negative_score_mean': negative_scores.mean(),
         }
+        
+        # Add affinity metrics if in affinity mode
+        if self.use_affinity_mode and positive_affinities is not None:
+            rt['affinity_mean'] = positive_affinities.mean()
+            rt['affinity_mse'] = F.mse_loss(positive_scores, positive_affinities)
+        
         self.test_step_outputs.append(rt)
         return loss  # Return only loss to avoid auto-logging
 

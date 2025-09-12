@@ -11,6 +11,35 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src import const
 from src.db_utils import db_connection
 
+def convert_binding_value_to_pk(binding_value, binding_unit):
+    """Convert binding value to pK (-log10(Kd in M))"""
+    if binding_value is None or binding_unit is None:
+        return None
+    
+    # Convert to molar (M) first
+    unit_lower = binding_unit.lower()
+    if 'um' in unit_lower or 'μm' in unit_lower:
+        kd_molar = binding_value * 1e-6  # uM to M
+    elif 'nm' in unit_lower:
+        kd_molar = binding_value * 1e-9  # nM to M
+    elif 'mm' in unit_lower:
+        kd_molar = binding_value * 1e-3  # mM to M
+    elif 'm' in unit_lower and 'u' not in unit_lower and 'n' not in unit_lower:
+        kd_molar = binding_value  # M to M
+    else:
+        return None  # Unknown unit
+    
+    # Convert to pK
+    if kd_molar > 0:
+        return -torch.log10(torch.tensor(kd_molar))
+    else:
+        return None
+
+# Global data attributes configuration
+DATA_LIST_ATTRS = ['pdb_id_i', 'pdb_id_j', 'name']
+DATA_ATTRS_TO_PAD = ['one_hot', 'edge_index', 'edge_attr', 'node_mask', 'edge_mask', 'protein_mask']
+DATA_ATTRS_TO_ADD_LAST_DIM = ['node_mask', 'edge_mask', 'protein_mask']
+
 def combine_pocket_ligand_graphs(pocket_graph, ligand_graph):
     """Combine pocket and ligand graphs into a single graph with cross-edges"""
     pocket_size = len(pocket_graph['coords'])
@@ -80,11 +109,6 @@ def combine_pocket_ligand_graphs(pocket_graph, ligand_graph):
 
 class PocketLigandDataset(Dataset):
     """Dataset for pocket-ligand interactions with dynamic graph combination"""
-    
-    # Class variables for data attributes
-    DATA_LIST_ATTRS = ['pdb_id_i', 'pdb_id_j']
-    DATA_ATTRS_TO_PAD = ['one_hot', 'edge_index', 'edge_attr', 'node_mask', 'edge_mask', 'protein_mask']
-    DATA_ATTRS_TO_ADD_LAST_DIM = ['node_mask', 'edge_mask', 'protein_mask']
 
     def __init__(self, device=None, split='train', table_name='pdbbind_dataset'):
         self.device = device
@@ -120,7 +144,7 @@ class PocketLigandDataset(Dataset):
 
     def _create_tensors(self, data):
         """Helper method to create tensors from data dictionary."""
-        return {
+        result = {
             'pdb_id_i': data['pdb_id_i'],
             'pdb_id_j': data['pdb_id_j'],
             'one_hot': torch.tensor(data['one_hot'], dtype=const.TORCH_FLOAT, device=self.device),
@@ -130,6 +154,15 @@ class PocketLigandDataset(Dataset):
             'edge_mask': torch.tensor(data['edge_mask'], dtype=const.TORCH_INT, device=self.device),
             'protein_mask': torch.tensor(data['protein_mask'], dtype=const.TORCH_INT, device=self.device)
         }
+        
+        # Add affinity if available
+        if 'affinity' in data and data['affinity'] is not None:
+            if isinstance(data['affinity'], torch.Tensor):
+                result['affinity'] = data['affinity'].to(device=self.device)
+            else:
+                result['affinity'] = torch.tensor(data['affinity'], dtype=const.TORCH_FLOAT, device=self.device)
+        
+        return result
 
     def _load_graph_data(self, item_id):
         """Load pocket and ligand graph data from database"""
@@ -138,6 +171,7 @@ class PocketLigandDataset(Dataset):
         
         with db_connection() as conn:
             cursor = conn.cursor()
+            # First get the pdb_id from pdbbind_dataset table
             cursor.execute(f"""
                 SELECT pdb_id,
                        pocket_one_hot, pocket_edge_index, pocket_edge_attr, pocket_coords,
@@ -146,10 +180,29 @@ class PocketLigandDataset(Dataset):
                 WHERE id = %s
             """, (item_id,))
             sample = cursor.fetchone()
+            
+            if sample is None:
+                cursor.close()
+                raise ValueError(f"Sample with id {item_id} not found in database")
+            
+            pdb_id = sample[0]
+            
+            # Then get binding affinity data from pdbbind table
+            cursor.execute("""
+                SELECT binding_value, binding_unit
+                FROM pdbbind
+                WHERE pdb_id = %s
+            """, (pdb_id,))
+            affinity_data = cursor.fetchone()
             cursor.close()
-        
-        if sample is None:
-            raise ValueError(f"Sample with id {item_id} not found in database")
+            
+            # Convert binding affinity to pK directly
+            if affinity_data:
+                binding_value, binding_unit = affinity_data
+                pk_value = convert_binding_value_to_pk(binding_value, binding_unit)
+            else:
+                binding_value, binding_unit = None, None
+                pk_value = None
         
         # Parse pocket graph
         pocket_graph = {
@@ -169,9 +222,10 @@ class PocketLigandDataset(Dataset):
         
         # Cache the data
         self.cache[item_id] = {
-            'pdb_id': sample[0],
+            'pdb_id': pdb_id,
             'pocket_graph': pocket_graph,
-            'ligand_graph': ligand_graph
+            'ligand_graph': ligand_graph,
+            'pk_value': pk_value
         }
         
         return self.cache[item_id]
@@ -201,7 +255,8 @@ class PocketLigandDataset(Dataset):
         )
         combined_graph_ii.update({
             'pdb_id_i': pdb_id_i,
-            'pdb_id_j': pdb_id_i  # Same ligand
+            'pdb_id_j': pdb_id_i,  # Same ligand
+            'affinity': data_i['pk_value']
         })
         
         # Combine pocket_i with ligand_j (negative pair)
@@ -211,7 +266,8 @@ class PocketLigandDataset(Dataset):
         )
         combined_graph_ij.update({
             'pdb_id_i': pdb_id_i,
-            'pdb_id_j': pdb_id_j  # Different ligand
+            'pdb_id_j': pdb_id_j,  # Different ligand
+            'affinity': None  # No affinity for negative pairs
         })
         
         return {
@@ -219,7 +275,29 @@ class PocketLigandDataset(Dataset):
             'negative': self._create_tensors(combined_graph_ij)
         }
 
-def collate_pocket_ligand(batch):
+def collate_batch_data(batch_data, data_list_attrs=DATA_LIST_ATTRS, data_attrs_to_pad=DATA_ATTRS_TO_PAD, data_attrs_to_add_last_dim=DATA_ATTRS_TO_ADD_LAST_DIM):
+    """Base collate function for batch data"""
+    out = {}
+    # Collect the list attributes
+    for data in batch_data:
+        for key, value in data.items():
+            if key in data_list_attrs or key in data_attrs_to_pad:
+                out.setdefault(key, []).append(value)
+
+    # Pad the tensors
+    for key, value in out.items():
+        if key in data_attrs_to_pad:
+            out[key] = torch.nn.utils.rnn.pad_sequence(value, batch_first=True, padding_value=0)
+            continue
+
+    # Add last dimension to the tensor
+    for key in data_attrs_to_add_last_dim:
+        if key in out.keys():
+            out[key] = out[key][:, :, None]
+    
+    return out
+
+def collate(batch):
     """Collate function for PocketLigandDataset"""
     positive_batch = []
     negative_batch = []
@@ -229,35 +307,14 @@ def collate_pocket_ligand(batch):
         positive_batch.append(sample['positive'])
         negative_batch.append(sample['negative'])
     
-    def collate_single_batch(batch_data):
-        out = {}
-        # Collect the list attributes
-        for data in batch_data:
-            for key, value in data.items():
-                if key in PocketLigandDataset.DATA_LIST_ATTRS or key in PocketLigandDataset.DATA_ATTRS_TO_PAD:
-                    out.setdefault(key, []).append(value)
-
-        # Pad the tensors
-        for key, value in out.items():
-            if key in PocketLigandDataset.DATA_ATTRS_TO_PAD:
-                out[key] = torch.nn.utils.rnn.pad_sequence(value, batch_first=True, padding_value=0)
-                continue
-
-        # Add last dimension to the tensor
-        for key in PocketLigandDataset.DATA_ATTRS_TO_ADD_LAST_DIM:
-            if key in out.keys():
-                out[key] = out[key][:, :, None]
-        
-        return out
-    
     return {
-        'positive': collate_single_batch(positive_batch),
-        'negative': collate_single_batch(negative_batch)
+        'positive': collate_batch_data(positive_batch),
+        'negative': collate_batch_data(negative_batch)
     }
 
 def get_pocket_ligand_dataloader(dataset, batch_size, shuffle=False):
     """Get DataLoader for PocketLigandDataset"""
-    return DataLoader(dataset, batch_size, collate_fn=collate_pocket_ligand, shuffle=shuffle)
+    return DataLoader(dataset, batch_size, collate_fn=collate, shuffle=shuffle)
 
 def test_dataset(table_name='pdbbind_dataset'):
     """Test function to verify dataset functionality"""

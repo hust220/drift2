@@ -1,5 +1,5 @@
 project: 'drift2'
-exp_name: 'pdbbind'
+exp_name: 'pdbbind_affinity'
 checkpoints: models
 logs: logs
 device: gpu
@@ -21,3 +21,4 @@ normalization_factor: 100
 aggregation_method: 'sum'
 data_augmentation: True
 table_name: 'pdbbind_dataset'
+use_affinity_mode: true  # Enable affinity mode

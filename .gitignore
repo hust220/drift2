@@ -1,7 +1,10 @@
 __pycache__
 .cursor
 /logs
-/models
+# Models directory - ignore everything except last.ckpt
+/models/*
+!/models/
+!/models/last.ckpt
 /test_output
 /src/*.pdb
 /src/*.pse
@@ -15,7 +18,9 @@ __pycache__
 !/data/pdbbind
 /analysis/casf_test/power_screening
 /analysis/casf_test/power_screening.tar
+# Ignore all other checkpoint files
 *.ckpt
+!/models/last.ckpt
 .DS_Store
 /slurm_logs
 backup

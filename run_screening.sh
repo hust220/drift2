@@ -1,13 +1,14 @@
 
 #!/bin/bash
 
-# Drift2 Screening Pipeline
-# This script automates the complete screening workflow from environment setup to analysis
+# Drift2 Universal Screening Pipeline
+# This script performs virtual screening using Drift2 model
+# Usage: ./run_screening.sh [pocket.pdb] [ligand_library.sdf]
 
 set -e  # Exit on any error
 
-echo "=== Drift2 Screening Pipeline ==="
-echo "Starting screening workflow..."
+echo "=== Drift2 Universal Screening Pipeline ==="
+echo "Starting virtual screening workflow..."
 
 # check if environment is set up
 echo "Checking environment setup..."
@@ -75,104 +76,75 @@ else
     echo "✓ Drift2 project found"
 fi
 
-# download yuel2 model
-echo "Checking for yuel2 model..."
+# check for model
+echo "Checking for model..."
 
-MODEL_DIR="models"
-YUEL2_MODEL="$MODEL_DIR/yuel2_model.ckpt"
+MODEL_PATH="models/last.ckpt"
 
-if [ ! -f "$YUEL2_MODEL" ]; then
-    echo "Yuel2 model not found. Please download it manually:"
-    echo "wget https://zenodo.org/records/16921378/files/yuel_pocket.ckpt?download=1 -O $YUEL2_MODEL"
-    echo "Or place your trained model checkpoint at: $YUEL2_MODEL"
-    echo "Continuing with default drift2 model..."
-    YUEL2_MODEL="./models/pdbbind_bs8_date23-08_time09-15-58.399588/last.ckpt"
+if [ ! -f "$MODEL_PATH" ]; then
+    echo "Error: Model not found at $MODEL_PATH"
+    echo "Please ensure the pre-trained model is available at models/last.ckpt"
+    exit 1
 else
-    echo "✓ Yuel2 model found at: $YUEL2_MODEL"
+    echo "✓ Model found at: $MODEL_PATH"
 fi
+
+# Get input parameters
+POCKET_FILE="$1"
+LIGAND_FILE="$2"
+
+# If parameters not provided, ask user
+if [ -z "$POCKET_FILE" ]; then
+    echo "Please provide the pocket PDB file path:"
+    read -r POCKET_FILE
+fi
+
+if [ -z "$LIGAND_FILE" ]; then
+    echo "Please provide the ligand library SDF file path:"
+    read -r LIGAND_FILE
+fi
+
+# Validate input files
+if [ ! -f "$POCKET_FILE" ]; then
+    echo "Error: Pocket file '$POCKET_FILE' not found"
+    exit 1
+fi
+
+if [ ! -f "$LIGAND_FILE" ]; then
+    echo "Error: Ligand file '$LIGAND_FILE' not found"
+    exit 1
+fi
+
+echo "✓ Input files validated:"
+echo "  - Pocket: $POCKET_FILE"
+echo "  - Ligand library: $LIGAND_FILE"
+
+# Generate output filename
+POCKET_NAME=$(basename "$POCKET_FILE" .pdb)
+LIGAND_NAME=$(basename "$LIGAND_FILE" .sdf)
+OUTPUT_FILE="${POCKET_NAME}_${LIGAND_NAME}_scores.txt"
+
+echo "Output will be saved to: $OUTPUT_FILE"
 
 # run screening
-echo "Starting screening process..."
+echo "Starting virtual screening..."
 
-# Define screening targets and their parameters
-declare -A TARGETS=(
-    ["GPR75_1"]="GPR75_pocket1.pdb"
-    ["GPR75_2"]="GPR75_pocket2.pdb" 
-    ["HCAR1"]="HCAR1_pocket.pdb"
-    ["HCAR2"]="HCAR2_pocket.pdb"
-)
+python drift2.py "$POCKET_FILE" "$LIGAND_FILE" "$OUTPUT_FILE" --model "$MODEL_PATH" --batch 128 --device auto
 
-# Define ligand databases
-declare -A LIGAND_DBS=(
-    ["GPR75_1"]="hmdb_metabolites.smi"
-    ["GPR75_2"]="hmdb_metabolites.smi"
-    ["HCAR1"]="hll460k_compounds.smi"
-    ["HCAR2"]="hll460k_compounds.smi"
-)
-
-# Run screening for each target
-for target in "${!TARGETS[@]}"; do
-    pocket_file="${TARGETS[$target]}"
-    ligand_db="${LIGAND_DBS[$target]}"
-    output_file="${target}_${ligand_db%.*}.scores"
-    
-    echo "Screening $target with $pocket_file against $ligand_db..."
-    
-    if [ ! -f "$pocket_file" ]; then
-        echo "Warning: Pocket file $pocket_file not found, skipping $target"
-        continue
-    fi
-    
-    if [ ! -f "$ligand_db" ]; then
-        echo "Warning: Ligand database $ligand_db not found, skipping $target"
-        continue
-    fi
-    
-    # Run drift2 screening
-    python drift2.py "$pocket_file" "$ligand_db" "$output_file" --model "$YUEL2_MODEL" --batch 128
-    
-    if [ $? -eq 0 ]; then
-        echo "✓ Screening completed for $target: $output_file"
-    else
-        echo "✗ Screening failed for $target"
-    fi
-done
-
-# run analysis
-echo "Starting analysis..."
-
-# Run analysis for GPR75 if scores exist
-if [ -f "GPR75_1_hmdb.scores" ] && [ -f "GPR75_2_hmdb.scores" ]; then
-    echo "Running GPR75 analysis..."
-    cd analysis/GPR75
-    python analyze_GPR75.py
-    cd ../..
-    echo "✓ GPR75 analysis completed"
+if [ $? -eq 0 ]; then
+    echo "✓ Virtual screening completed successfully!"
+    echo "Results saved to: $OUTPUT_FILE"
+else
+    echo "✗ Virtual screening failed"
+    exit 1
 fi
 
-# Run analysis for HCAR if scores exist  
-if [ -f "HCAR1_HLL460K.scores" ] && [ -f "HCAR2_HLL460K.scores" ]; then
-    echo "Running HCAR analysis..."
-    cd analysis/HCAR
-    python analyze_HCAR.py
-    cd ../..
-    echo "✓ HCAR analysis completed"
-fi
-
-# Run PDBbind analysis if available
-if [ -f "analysis/pdbbind/analyze_pdbbind.py" ]; then
-    echo "Running PDBbind analysis..."
-    cd analysis/pdbbind
-    python analyze_pdbbind.py
-    cd ../..
-    echo "✓ PDBbind analysis completed"
-fi
-
-echo "=== Screening Pipeline Completed ==="
-echo "Check the following for results:"
-echo "- Score files: *.scores"
-echo "- Analysis results: analysis/*/top100_size_filtered_scores.csv"
-echo "- Distribution plots: analysis/*/score_distribution.png"
+echo "=== Virtual Screening Pipeline Completed ==="
+echo ""
+echo "Results saved to: $OUTPUT_FILE"
+echo ""
+echo "The output file contains compound IDs and their predicted affinity scores."
+echo "Higher scores indicate stronger predicted binding affinity."
 
 
 

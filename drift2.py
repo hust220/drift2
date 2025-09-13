@@ -181,11 +181,43 @@ def predict_affinities_batch(receptor_path, ligand_path, model, device, output_f
     print(f"Successfully processed {processed_count} molecules")
     return processed_count
 
+def get_device(device_arg):
+    """Get the appropriate device based on user input and availability"""
+    if device_arg.lower() == 'auto':
+        if torch.cuda.is_available():
+            return torch.device("cuda"), "CUDA"
+        elif torch.backends.mps.is_available():
+            return torch.device("mps"), "MPS"
+        else:
+            return torch.device("cpu"), "CPU"
+    elif device_arg.lower() == 'cuda':
+        if torch.cuda.is_available():
+            return torch.device("cuda"), "CUDA"
+        else:
+            print("Warning: CUDA requested but not available, falling back to CPU")
+            return torch.device("cpu"), "CPU"
+    elif device_arg.lower() == 'mps':
+        if torch.backends.mps.is_available():
+            return torch.device("mps"), "MPS"
+        else:
+            print("Warning: MPS requested but not available, falling back to CPU")
+            return torch.device("cpu"), "CPU"
+    elif device_arg.lower() == 'cpu':
+        return torch.device("cpu"), "CPU"
+    else:
+        # Try to use the specified device directly
+        try:
+            device = torch.device(device_arg)
+            return device, device_arg.upper()
+        except:
+            print(f"Warning: Device '{device_arg}' not recognized, falling back to CPU")
+            return torch.device("cpu"), "CPU"
+
 def main(args):
     print("Initializing Drift2 affinity prediction...")
-    print(f"Using device: {'CUDA' if torch.cuda.is_available() else 'CPU'}")
     
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device, device_name = get_device(args.device)
+    print(f"Using device: {device_name}")
     
     print("Loading model...")
     drift2_model = Drift2.load_from_checkpoint(args.model, map_location=device).eval().to(device)
@@ -224,6 +256,10 @@ if __name__ == '__main__':
     parser.add_argument(
         '--batch', action='store', type=int, default=128,
         help='Batch size for prediction (default: 128)'
+    )
+    parser.add_argument(
+        '--device', action='store', type=str, default='auto',
+        help='Device to use: auto, cuda, mps, cpu, or specific device (default: auto)'
     )
     
     args = parser.parse_args()

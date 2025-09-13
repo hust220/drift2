@@ -1,13 +1,8 @@
 #%%
 
 import argparse
-import os
-import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
-from rdkit import Chem
-from rdkit.Chem import AllChem
-import io
 from src import const
 from src.datasets import combine_pocket_ligand_graphs, collate_batch_data
 from src.graph_utils import (
@@ -16,8 +11,6 @@ from src.graph_utils import (
 )
 from src.lightning import Drift2
 from tqdm import tqdm
-from src.db_utils import db_connection
-from src.pdb_utils import Structure
 from rdkit import RDLogger
 RDLogger.DisableLog('rdApp.*')
 

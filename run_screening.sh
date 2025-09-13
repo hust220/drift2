@@ -55,35 +55,34 @@ else:
     print('✓ All required packages are installed')
 "
 
-# check if drift2 folder is set up
+# check if drift2 project is set up
 echo "Checking drift2 project..."
 
 # Hardcoded repository URL from .git/config
 REPO_URL="https://github.com/hust220/drift2.git"
 
-# Check if we're in the drift2 directory
-if [ ! -f "drift2.py" ]; then
-    echo "Drift2 project not found in current directory"
-    echo "Cloning from GitHub: $REPO_URL"
-    
-    # Go to parent directory and clone
-    cd ..
-    git clone "$REPO_URL"
-    cd drift2
-    
-    echo "✓ Drift2 project cloned successfully"
+# Check if drift2.py exists in current directory or drift2 subdirectory
+if [ -f "drift2.py" ]; then
+    echo "✓ Drift2 project found in current directory"
+    DRIFT2_DIR="."
+elif [ -f "drift2/drift2.py" ]; then
+    echo "✓ Drift2 project found in drift2/ subdirectory"
+    DRIFT2_DIR="drift2"
 else
-    echo "✓ Drift2 project found"
+    echo "Drift2 project not found, cloning from GitHub: $REPO_URL"
+    git clone "$REPO_URL"
+    echo "✓ Drift2 project cloned successfully"
+    DRIFT2_DIR="drift2"
 fi
 
 # check for model
 echo "Checking for model..."
 
-MODEL_PATH="models/last.ckpt"
+MODEL_PATH="$DRIFT2_DIR/models/last.ckpt"
 
 if [ ! -f "$MODEL_PATH" ]; then
     echo "Error: Model not found at $MODEL_PATH"
-    echo "Please ensure the pre-trained model is available at models/last.ckpt"
+    echo "Please ensure the pre-trained model is available at $DRIFT2_DIR/models/last.ckpt"
     exit 1
 else
     echo "✓ Model found at: $MODEL_PATH"
@@ -129,7 +128,7 @@ echo "Output will be saved to: $OUTPUT_FILE"
 # run screening
 echo "Starting virtual screening..."
 
-python drift2.py "$POCKET_FILE" "$LIGAND_FILE" "$OUTPUT_FILE" --model "$MODEL_PATH" --batch 128 --device auto
+python "$DRIFT2_DIR/drift2.py" "$POCKET_FILE" "$LIGAND_FILE" "$OUTPUT_FILE" --model "$MODEL_PATH" --batch 128 --device auto
 
 if [ $? -eq 0 ]; then
     echo "✓ Virtual screening completed successfully!"

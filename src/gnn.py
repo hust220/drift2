@@ -1,19 +1,6 @@
-import math
-import numpy as np
+
 import torch
 import torch.nn as nn
-
-from src import utils
-from pdb import set_trace
-from src import const
-
-def coord2diff(x, edge_index, norm_constant=1):
-    row, col = edge_index
-    coord_diff = x[row] - x[col]
-    radial = torch.sum((coord_diff) ** 2, 1).unsqueeze(1)
-    norm = torch.sqrt(radial + 1e-8)
-    coord_diff = coord_diff/(norm + norm_constant)
-    return radial, coord_diff # (n_edges,1), (n_edges,n_feats)
 
 def unsorted_segment_sum(data, segment_ids, num_segments, normalization_factor, aggregation_method: str):
     """Custom PyTorch op to replicate TensorFlow's `unsorted_segment_sum`.
@@ -53,7 +40,6 @@ class GCL(nn.Module):
 
         self.node_mlp = nn.Sequential(
             nn.Linear(out_edge_dim + in_node_dim + node_att_dim, hidden_dim),
-#            nn.BatchNorm1d(hidden_nf),
             nn.LayerNorm(hidden_dim),
             activation,
             nn.Linear(hidden_dim, out_node_dim),
@@ -70,16 +56,16 @@ class GCL(nn.Module):
 
         out = edge_feat + self.edge_mlp(out)
 
-        if edge_mask is not None:
-            out = out * edge_mask
+        out = out * edge_mask
 
         return out
 
     def node_model(self, h, edge_index, edge_feat, node_attr, node_mask):
         row, col = edge_index
         agg = unsorted_segment_sum(edge_feat, row, num_segments=h.size(0),
-                                   normalization_factor=self.normalization_factor,
-                                   aggregation_method=self.aggregation_method)
+                                    normalization_factor=self.normalization_factor,
+                                    aggregation_method=self.aggregation_method)
+        
         if node_attr is not None:
             agg = torch.cat([h, agg, node_attr], dim=1)
         else:
@@ -87,25 +73,15 @@ class GCL(nn.Module):
 
         out = h + self.node_mlp(agg)
 
-        if node_mask is not None:
-            out = out * node_mask
+        out = out * node_mask
 
         return out
 
     def forward(self, h, edge_index, edge_feat, edge_attr=None, node_attr=None, node_mask=None, edge_mask=None):
-        row, col = edge_index
-        # print('edge_index.dtype', edge_index.dtype)
-        # print('h.dtype', h.dtype)
-        # print('edge_feat.dtype', edge_feat.dtype)
-        # print('edge_attr.dtype', edge_attr.dtype)
-        # print('edge_mask.dtype', edge_mask.dtype)
-        # print('h.shape', h.shape)
-        # print('row.max()', row.max())
-        # print('col.max()', col.max())
+        row, col = edge_index        
         edge_feat = self.edge_model(h[row], h[col], edge_feat, edge_attr, edge_mask)
         h = self.node_model(h, edge_index, edge_feat, node_attr, node_mask)
         return h, edge_feat
-
 
 def merge_edges(edge_index, edge_attr, edge_mask, node_mask):
     # edge_index: (b,n_edges,2)
@@ -114,14 +90,14 @@ def merge_edges(edge_index, edge_attr, edge_mask, node_mask):
     # node_mask: (b,n_nodes,1)
     batch_size, n_edges, n_feats = edge_attr.shape
     
-    n_nodes = node_mask.squeeze(-1).sum(1)
-    n_nodes = torch.cumsum(n_nodes, dim=0)
-    n_nodes = torch.cat([torch.zeros(1, dtype=n_nodes.dtype, device=n_nodes.device), n_nodes[:-1]])
+    # Use actual node count (including padding) instead of valid node count
+    n_nodes_per_graph = node_mask.shape[1]  # This is the actual node count per graph
+    n_nodes = torch.arange(batch_size, device=node_mask.device) * n_nodes_per_graph
     n_nodes = n_nodes.view(-1,1,1)
 
     edge_index = edge_index + n_nodes
     edge_index = edge_index.view(-1,2)
-    edge_index = edge_index.t()
+    # edge_index = edge_index.t()
 
     edge_attr = edge_attr.view(-1, n_feats)
 
@@ -184,25 +160,32 @@ class GNN(nn.Module):
         # node_mask (b,n_nodes,1) => (b*n_nodes,1)
         # edge_mask (b,n_nodes,1) => (b*n_nodes,1)
 
-        # print('h.shape', h.shape)
         batch_size, _, node_nf = h.shape
+        _, n_edges, _ = edge_attr.shape
+
         h = h.view(-1, node_nf)
+
         edge_index, edge_attr, edge_mask = merge_edges(edge_index, edge_attr, edge_mask, node_mask)
+        # edge_index: (b*n_edges,2)
+        # edge_attr: (b*n_edges,n_feats)
+        # edge_mask: (b*n_edges,1)
+
+        valid = (edge_mask.squeeze(-1) > 0).view(-1)
+        edge_index_valid = edge_index[valid]
+        edge_attr_valid = edge_attr[valid]
+        edge_mask_valid = edge_mask[valid]
+
+        edge_index_valid = edge_index_valid.t()
+
         node_mask = node_mask.view(-1, 1)
-
-        if edge_mask is not None:
-           edge_mask = edge_mask.view(-1, 1)
-
         h = self.embedding_node(h)
-        edge_feat = self.embedding_edge(edge_attr)
+        edge_feat = self.embedding_edge(edge_attr_valid)
         for i in range(0, self.n_layers):
-            h, edge_feat = self._modules["gcl_%d" % i](h, edge_index, edge_feat, edge_attr=edge_attr, node_mask=node_mask, edge_mask=edge_mask)
+            h, edge_feat = self._modules["gcl_%d" % i](h, edge_index_valid, edge_feat, edge_attr=edge_attr_valid, node_mask=node_mask, edge_mask=edge_mask_valid)
 
         # Important, the bias of the last linear might be non-zero
-        if node_mask is not None:
-            h = h * node_mask
-        if edge_mask is not None:
-            edge_feat = edge_feat * edge_mask
+        h = h * node_mask
+        edge_feat = edge_feat * edge_mask_valid
 
         if self.out_node_nf != 0:
             h = self.embedding_node_out(h)
@@ -210,7 +193,10 @@ class GNN(nn.Module):
 
         if self.out_edge_nf != 0:
             edge_feat = self.embedding_edge_out(edge_feat)
-            edge_feat = edge_feat.view(batch_size, -1, self.out_edge_nf) # (b, n_edges, out_edge_nf)
+            # Reconstruct edge_feat to original shape using valid mask
+            edge_feat_out = torch.zeros(batch_size*n_edges, self.out_edge_nf, device=edge_feat.device)
+            edge_feat_out[valid] = edge_feat
+            edge_feat = edge_feat_out.view(batch_size, n_edges, self.out_edge_nf) # (b, n_edges, out_edge_nf)
 
         return h, edge_feat
 

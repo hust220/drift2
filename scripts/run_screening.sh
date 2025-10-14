@@ -39,7 +39,21 @@ else:
 echo "Checking Python dependencies..."
 python -c "
 import sys
-required_packages = ['torch', 'rdkit', 'pandas', 'numpy', 'matplotlib', 'scipy', 'lightning']
+import subprocess
+
+# Package mapping: import_name -> pip_install_name
+package_mapping = {
+    'torch': 'torch',
+    'rdkit': 'rdkit',
+    'pandas': 'pandas',
+    'numpy': 'numpy',
+    'matplotlib': 'matplotlib',
+    'scipy': 'scipy',
+    'lightning': 'lightning',
+    'psycopg2': 'psycopg2-binary'  # Use binary version for easier installation
+}
+
+required_packages = list(package_mapping.keys())
 missing = []
 for pkg in required_packages:
     try:
@@ -49,8 +63,15 @@ for pkg in required_packages:
 
 if missing:
     print(f'Missing packages: {missing}')
-    print('Please install with: pip install ' + ' '.join(missing))
-    sys.exit(1)
+    print('Installing missing packages...')
+    
+    # Install missing packages using mapping
+    for pkg in missing:
+        install_name = package_mapping[pkg]
+        print(f'Installing {pkg} (as {install_name})...')
+        subprocess.check_call([sys.executable, '-m', 'pip', 'install', install_name])
+    
+    print('✓ All required packages installed successfully')
 else:
     print('✓ All required packages are installed')
 "

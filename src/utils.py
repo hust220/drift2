@@ -1,9 +1,68 @@
 import sys
 import random
 from datetime import datetime
-
+import glob
+import os
+import re
 import torch
 import numpy as np
+
+def pick_latest(patterns, exclude=None, search_dir=None):
+    """Find the latest checkpoint file matching the given patterns, excluding specified patterns."""
+    # Determine base search directory. Default to project_root/models
+    if search_dir is None:
+        project_root = os.path.dirname(os.path.dirname(__file__))
+        base_dir = os.path.join(project_root, 'models')
+    else:
+        base_dir = search_dir
+
+    files = []
+    for p in patterns:
+        # Build robust glob patterns under base_dir
+        direct = os.path.join(base_dir, p)
+        fuzzy = os.path.join(base_dir, '**', f'*{p}*')
+        files.extend(glob.glob(direct, recursive=True))
+        files.extend(glob.glob(fuzzy, recursive=True))
+    if exclude:
+        files = [f for f in files if not any(x in f for x in exclude)]
+    if not files:
+        raise FileNotFoundError('No matching checkpoint found')
+    def parse_info(filepath):
+        name = os.path.basename(filepath)
+        # Extract timestamp from filename like: date01-10_time12-09-56.120775
+        tm = re.search(r"date(\d{2})-(\d{2})_time(\d{2})-(\d{2})-(\d{2})(?:\.(\d+))?", name)
+        em = re.search(r"epoch=(\d+)", name)
+        epoch = int(em.group(1)) if em else -1
+        if tm:
+            month = int(tm.group(1))
+            day = int(tm.group(2))
+            hour = int(tm.group(3))
+            minute = int(tm.group(4))
+            second = int(tm.group(5))
+            microsecond = int((tm.group(6) or '0')[:6].ljust(6, '0'))
+            # Use file's mtime year to avoid year-boundary ambiguity
+            year = datetime.fromtimestamp(os.path.getmtime(filepath)).year
+            try:
+                dt = datetime(year, month, day, hour, minute, second, microsecond)
+            except ValueError:
+                dt = None
+        else:
+            dt = None
+        return dt, epoch
+
+    infos = [(f, *parse_info(f)) for f in files]
+    with_dt = [it for it in infos if it[1] is not None]
+
+    if with_dt:
+        # Prefer latest timestamp, then highest epoch, then filename for determinism
+        return max(with_dt, key=lambda it: (it[1], it[2], it[0]))[0]
+
+    with_epoch = [it for it in infos if it[2] >= 0]
+    if with_epoch:
+        return max(with_epoch, key=lambda it: (it[2], it[0]))[0]
+
+    # Fallback to modification time if neither timestamp nor epoch found
+    return max(files, key=os.path.getmtime)
 
 class Logger(object):
     def __init__(self, logpath, syspart=sys.stdout):

@@ -1,9 +1,11 @@
-#%%
-
 import argparse
+import os
+import tempfile
+import sys
 import torch
 from torch.utils.data import Dataset, DataLoader
 from src import const
+from src import utils
 from src.datasets import combine_pocket_ligand_graphs, collate_batch_data
 from src.graph_utils import (
     parse_pocket_from_pdb, parse_molecules_from_sdf, parse_molecules_from_smi,
@@ -107,7 +109,6 @@ class BatchPredictionDataset(Dataset):
     
     def _build_sdf_index(self):
         """Build index of SDF molecule positions"""
-        print(f"Building SDF index for {self.ligand_path}...")
         self._sdf_positions = []
         
         with open(self.ligand_path, 'r') as f:
@@ -119,12 +120,9 @@ class BatchPredictionDataset(Dataset):
                     self._sdf_positions.append((start_pos, end_pos))
                     start_pos = end_pos
                 pos += len(line)
-        
-        print(f"Found {len(self._sdf_positions):,} molecules")
     
     def _build_smi_index(self):
         """Build index of SMILES line positions"""
-        print(f"Building SMILES index for {self.ligand_path}...")
         self._smi_positions = []
         
         with open(self.ligand_path, 'r') as f:
@@ -134,45 +132,63 @@ class BatchPredictionDataset(Dataset):
                     line_len = len(line)
                     self._smi_positions.append((pos, pos + line_len))
                 pos += line_len
-        
-        print(f"Found {len(self._smi_positions):,} molecules")
 
-def predict_affinities_batch(receptor_path, ligand_path, model, device, output_file, batch=128):
+def predict_affinities_batch(receptor_path, ligand_path, model, device, output_file, batch=128, include_affinity=False):
     print("Reading receptor file...")
     with open(receptor_path, 'r') as f:
         pdb_content = f.read()
     
-    print(f"Creating dataset...")
-    dataset = BatchPredictionDataset(pdb_content, ligand_path, device)
-    dataloader = DataLoader(dataset, batch_size=batch, collate_fn=collate_batch_data, shuffle=False)
-    
-    print(f"Processing {len(dataset)} molecules in batches of {batch}...")
-    
-    processed_count = 0
-    
-    model.eval()
-    with torch.no_grad():
-        for batch in tqdm(dataloader, desc="Processing batches"):
-            try:
-                # Get batch predictions
-                affinity_scores = model.forward(batch)  # shape: (batch_size,)
+    # If ligand_path is not a file, treat it as a SMILES string and write a temporary .smi file
+    needs_cleanup = False
+    ligand_source = ligand_path
+    if not os.path.isfile(ligand_path):
+        print("Ligand argument is not a file; writing to a temporary .smi file...")
+        tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.smi', delete=False)
+        # Write as "SMILES<TAB>NAME" so that downstream parsing has an identifier
+        tmp.write(f"{ligand_path}\tQUERY\n")
+        tmp.flush()
+        tmp.close()
+        ligand_source = tmp.name
+        needs_cleanup = True
+
+    try:
+        print(f"Creating dataset...")
+        dataset = BatchPredictionDataset(pdb_content, ligand_source, device)
+        dataloader = DataLoader(dataset, batch_size=batch, collate_fn=collate_batch_data, shuffle=False)
+        
+        print(f"Processing {len(dataset)} molecules in batches of {batch}...")
+        
+        processed_count = 0
+        
+        model.eval()
+        with torch.no_grad():
+            for batch in tqdm(dataloader, desc="Processing batches"):
+                affinity_scores = model.forward(batch)
                 names = batch['name']
-                
-                # Write results
                 for name, score in zip(names, affinity_scores):
-                    if name:
-                        output_file.write(f"{name}\t{score.item():.4f}\n")
+                    score_val = score.item()
+                    if include_affinity:
+                        # Convert score to affinity in nM: affinity_nM = (10^(-score)) * 1e9
+                        affinity_nm = (10 ** (-score_val)) * 1e9
+                        if name:
+                            output_file.write(f"{name}\t{score_val:.4f}\t{affinity_nm:.2f}\n")
+                        else:
+                            output_file.write(f"{score_val:.4f}\t{affinity_nm:.2f}\n")
                     else:
-                        output_file.write(f"{score.item():.4f}\n")
-                
+                        if name:
+                            output_file.write(f"{name}\t{score_val:.4f}\n")
+                        else:
+                            output_file.write(f"{score_val:.4f}\n")
                 output_file.flush()
                 processed_count += len(names)
-                
-            except Exception as e:
-                print(f"Warning: Failed to process batch: {e}")
-    
-    print(f"Successfully processed {processed_count} molecules")
-    return processed_count
+        print(f"Successfully processed {processed_count} molecules")
+        return processed_count
+    finally:
+        if needs_cleanup:
+            try:
+                os.remove(ligand_source)
+            except Exception:
+                pass
 
 def get_device(device_arg):
     """Get the appropriate device based on user input and availability"""
@@ -212,18 +228,41 @@ def main(args):
     device, device_name = get_device(args.device)
     print(f"Using device: {device_name}")
     
+    resolved_ckpt = utils.pick_latest([args.model])
+    print(f"Using checkpoint: {resolved_ckpt}")
+
     print("Loading model...")
-    drift2_model = Drift2.load_from_checkpoint(args.model, map_location=device).eval().to(device)
+    drift2_model = Drift2.load_from_checkpoint(resolved_ckpt, map_location=device).eval().to(device)
     print("Model loaded successfully!")
     
     print(f"Processing {args.receptor} with {args.ligand}")
-    print(f"Results will be saved to: {args.output}")
+    if os.path.isfile(args.ligand):
+        if not args.output:
+            raise SystemExit("Error: output path is required when ligand is a file (.sdf/.smi)")
+        print(f"Results will be saved to: {args.output}")
+    else:
+        if args.output:
+            print(f"Results will be saved to: {args.output}")
+        else:
+            print("No output path provided for SMILES input; writing results to stdout")
     print(f"Batch size: {args.batch}")
     
-    with open(args.output, 'w') as output_file:
-        processed_count = predict_affinities_batch(
-            args.receptor, args.ligand, drift2_model, device, output_file, args.batch
-        )
+    if os.path.isfile(args.ligand):
+        with open(args.output, 'w') as output_file:
+            processed_count = predict_affinities_batch(
+                args.receptor, args.ligand, drift2_model, device, output_file, args.batch, args.include_affinity
+            )
+    else:
+        # Write to provided file if given; otherwise stdout
+        if args.output:
+            with open(args.output, 'w') as output_file:
+                processed_count = predict_affinities_batch(
+                    args.receptor, args.ligand, drift2_model, device, output_file, args.batch, args.include_affinity
+                )
+        else:
+            processed_count = predict_affinities_batch(
+                args.receptor, args.ligand, drift2_model, device, sys.stdout, args.batch, args.include_affinity
+            )
     
     print(f"Prediction completed! Processed {processed_count} molecules.")
     print(f"Results saved to: {args.output}")
@@ -239,12 +278,12 @@ if __name__ == '__main__':
         help='Path to the ligand SDF or SMI file'
     )
     parser.add_argument(
-        'output', action='store', type=str,
-        help='Path to the output file (required)'
+        'output', nargs='?', default=None, type=str,
+        help='Output file path. Required when ligand is a file; optional for SMILES (stdout if omitted)'
     )
     parser.add_argument(
-        '--model', action='store', type=str, default='./models/pdbbind_bs8_date23-08_time09-15-58.399588/last.ckpt',
-        help='Path to the Drift2 model checkpoint'
+        '--model', action='store', type=str, default='pdbbind_aff',
+        help='Checkpoint path or glob/pattern; latest match will be used'
     )
     parser.add_argument(
         '--batch', action='store', type=int, default=128,
@@ -253,6 +292,10 @@ if __name__ == '__main__':
     parser.add_argument(
         '--device', action='store', type=str, default='auto',
         help='Device to use: auto, cuda, mps, cpu, or specific device (default: auto)'
+    )
+    parser.add_argument(
+        '--include-affinity', action='store_true', default=False,
+        help='Include predicted affinity in nM units in output (default: False)'
     )
     
     args = parser.parse_args()
